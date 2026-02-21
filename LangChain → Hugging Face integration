@@ -1,0 +1,452 @@
+Quick references: the repo uses LangChain → Hugging Face integration and sentence-transformers/all-MiniLM-L6-v2 for embeddings. See LangChain docs and the model card for details.  ￼
+
+⸻
+
+Repo root — file list
+
+README.md
+requirements.txt
+.gitignore
+.devcontainer/devcontainer.json
+.devcontainer/Dockerfile
+.vscode/launch.json
+.vscode/tasks.json
+.github/workflows/ci.yml
+data/.gitkeep
+indexes/.gitkeep
+src/ingest.py
+src/agent.py
+src/run.py
+
+
+⸻
+
+Copy-paste file contents
+
+Create each file with the exact content below.
+
+⸻
+
+README.md
+
+# LangChain + Local Hugging Face RAG Starter
+
+Purpose
+-------
+Prototype a retrieval-augmented generation (RAG) agent using:
+- Local HF generation model: `google/flan-t5-small`
+- Embeddings: `sentence-transformers/all-MiniLM-L6-v2`
+- Vector DB: FAISS
+- Orchestration: LangChain (lightweight use)
+
+Prerequisites
+-------------
+- Python 3.10+
+- Git
+- (Optional) GPU + CUDA for larger models
+
+Quick local install
+-------------------
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+Prepare documents
+
+Put PDFs or .txt files in data/. The ingestion script supports .txt and .pdf.
+
+Build index
+
+python src/ingest.py --data-dir ./data --index-path ./indexes/faiss_index.pkl
+
+Run agent (interactive)
+
+python src/run.py --index ./indexes/faiss_index.pkl
+
+Notes
+	•	To swap generator model, edit src/agent.py and change MODEL_NAME.
+	•	For production-quality results, use larger models on GPU and add safety/guardrails.
+
+---
+
+### `requirements.txt`
+```text
+# Python 3.10+ recommended
+langchain>=0.0.300
+transformers>=4.35.0
+sentence-transformers>=2.2.2
+faiss-cpu>=1.7.3
+huggingface-hub>=0.16.4
+accelerate>=0.21.0
+tqdm
+python-dotenv
+gradio
+pypdf
+
+
+⸻
+
+.gitignore
+
+.venv/
+__pycache__/
+indexes/
+*.pth
+*.bin
+
+
+⸻
+
+.devcontainer/devcontainer.json
+
+{
+  "name": "LangChain HF RAG Devcontainer",
+  "image": "mcr.microsoft.com/vscode/devcontainers/python:0-3.11",
+  "postCreateCommand": "python -m venv .venv && . .venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  },
+  "remoteUser": "vscode"
+}
+
+
+⸻
+
+.devcontainer/Dockerfile
+
+# Use the official devcontainer Python base
+FROM mcr.microsoft.com/vscode/devcontainers/python:0-3.11
+
+# Install system packages commonly needed for ML packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    cmake \
+    libopenblas-base \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+
+⸻
+
+.vscode/launch.json
+
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Agent (ingest -> run)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/run.py",
+      "console": "integratedTerminal",
+      "args": ["--index", "${workspaceFolder}/indexes/faiss_index.pkl"]
+    }
+  ]
+}
+
+
+⸻
+
+.vscode/tasks.json
+
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build index",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python src/ingest.py --data-dir ${workspaceFolder}/data --index-path ${workspaceFolder}/indexes/faiss_index.pkl",
+      "group": "build"
+    }
+  ]
+}
+
+
+⸻
+
+.github/workflows/ci.yml
+
+name: CI - build index & smoke test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare sample data
+        run: |
+          mkdir -p data
+          echo "This is a CI sample document. It contains simple text for index build." > data/sample.txt
+
+      - name: Build FAISS index
+        run: |
+          python src/ingest.py --data-dir data --index-path indexes/ci_faiss_index.pkl
+
+      - name: Smoke test - index exists
+        run: |
+          if [ -f indexes/ci_faiss_index.pkl ]; then
+            echo "Index built successfully."
+          else
+            echo "Index not found!" >&2
+            exit 1
+          fi
+
+
+⸻
+
+data/.gitkeep
+
+# keep the data directory in git
+
+
+⸻
+
+indexes/.gitkeep
+
+# keep the indexes directory in git
+
+
+⸻
+
+src/ingest.py
+
+# src/ingest.py
+import argparse
+import os
+import pickle
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.document_loaders import TextLoader, PyPDFLoader
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import faiss
+from tqdm import tqdm
+
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+def load_documents(data_dir: str):
+    docs = []
+    for fname in os.listdir(data_dir):
+        path = os.path.join(data_dir, fname)
+        if fname.lower().endswith(".txt"):
+            loader = TextLoader(path, encoding="utf-8")
+            docs.extend(loader.load())
+        elif fname.lower().endswith(".pdf"):
+            loader = PyPDFLoader(path)
+            docs.extend(loader.load())
+        else:
+            print(f"Skipping unsupported file: {fname}")
+    return docs
+
+def chunk_documents(docs, chunk_size=1000, chunk_overlap=200):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    texts = []
+    metadata = []
+    for d in docs:
+        chunks = splitter.split_text(d.page_content)
+        for i, c in enumerate(chunks):
+            texts.append(c)
+            metadata.append({"source": getattr(d, "metadata", {}), "chunk": i})
+    return texts, metadata
+
+def build_faiss_index(embeddings: np.ndarray, dim: int):
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeddings)
+    return index
+
+def main(data_dir, index_path):
+    print("Loading documents...")
+    docs = load_documents(data_dir)
+    if not docs:
+        raise SystemExit("No documents found in data directory.")
+    print(f"Loaded {len(docs)} documents. Chunking...")
+    texts, metadata = chunk_documents(docs)
+    print(f"Total chunks: {len(texts)}")
+
+    print("Loading embedding model...")
+    embedder = SentenceTransformer(EMBED_MODEL)
+    print("Encoding...")
+    embeddings = embedder.encode(texts, show_progress_bar=True, convert_to_numpy=True)
+
+    dim = embeddings.shape[1]
+    print(f"Embeddings dimension: {dim}")
+
+    print("Building FAISS index...")
+    index = build_faiss_index(embeddings, dim)
+
+    # persist everything
+    os.makedirs(os.path.dirname(index_path), exist_ok=True)
+    with open(index_path, "wb") as f:
+        pickle.dump({
+            "index": index,
+            "texts": texts,
+            "metadata": metadata,
+            "dim": dim
+        }, f)
+    print(f"Index saved to {index_path}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--index-path", required=True)
+    args = parser.parse_args()
+    main(args.data_dir, args.index_path)
+
+
+⸻
+
+src/agent.py
+
+# src/agent.py
+import pickle
+from transformers import pipeline
+from sentence_transformers import SentenceTransformer
+from typing import List
+
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+MODEL_NAME = "google/flan-t5-small"   # CPU-friendly generation model; swap for GPU models as needed
+
+class SimpleRAGAgent:
+    def __init__(self, index_path: str, k: int = 3, device: int = -1):
+        with open(index_path, "rb") as f:
+            state = pickle.load(f)
+        self.index = state["index"]
+        self.texts = state["texts"]
+        self.metadata = state["metadata"]
+        self.dim = state["dim"]
+        self.k = k
+
+        # embedding model
+        self.embedder = SentenceTransformer(EMBED_MODEL)
+
+        # generation pipeline: text2text-generation for Flan-T5
+        # device=-1 uses CPU; for GPU set device=0
+        self.generator = pipeline("text2text-generation", model=MODEL_NAME, device=device, truncation=True)
+
+    def retrieve(self, query: str) -> List[str]:
+        qvec = self.embedder.encode([query], convert_to_numpy=True)
+        D, I = self.index.search(qvec, self.k)
+        results = []
+        for idx in I[0]:
+            if idx < len(self.texts):
+                results.append(self.texts[idx])
+        return results
+
+    def make_prompt(self, query: str, contexts: List[str]) -> str:
+        context_text = "\n\n---\n\n".join(contexts)
+        prompt = (
+            "You are a helpful assistant. Use the following extracted context to answer the question. "
+            "If the answer is not contained within the context, say you don't know.\n\n"
+            f"Context:\n{context_text}\n\nQuestion: {query}\n\nAnswer:"
+        )
+        return prompt
+
+    def answer(self, query: str) -> str:
+        contexts = self.retrieve(query)
+        prompt = self.make_prompt(query, contexts)
+        # generator returns list of dicts
+        out = self.generator(prompt, max_length=512, do_sample=False)
+        return out[0]["generated_text"]
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--index", required=True)
+    args = parser.parse_args()
+    agent = SimpleRAGAgent(args.index)
+    while True:
+        q = input("Question (or 'exit')> ").strip()
+        if q.lower() in ("exit", "quit"):
+            break
+        print("\n--- Retrieved + Answer ---")
+        print(agent.answer(q))
+        print("---------------------------\n")
+
+
+⸻
+
+src/run.py
+
+# src/run.py
+import argparse
+from agent import SimpleRAGAgent
+
+def main(index_path):
+    agent = SimpleRAGAgent(index_path)
+    print("Agent ready. Type your question (Ctrl-C to quit).")
+    try:
+        while True:
+            q = input(">> ").strip()
+            if not q:
+                continue
+            print("Answer:")
+            print(agent.answer(q))
+            print()
+    except KeyboardInterrupt:
+        print("\nExiting.")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--index", required=True)
+    args = parser.parse_args()
+    main(args.index)
+
+
+⸻
+
+How to create the repository quickly
+	1.	Create a new repository on GitHub (e.g., langchain-local-hf-starter).
+	2.	Clone it locally:
+
+git clone git@github.com:YOUR_ORG/langchain-local-hf-starter.git
+cd langchain-local-hf-starter
+
+
+	3.	Create the file tree above and paste each file’s content.
+	4.	Commit and push:
+
+git add .
+git commit -m "Initial commit: LangChain local HF RAG starter + devcontainer + CI"
+git push origin main
+
+
+
+After pushing, GitHub Actions will run the CI workflow on main (or you can run it manually via Actions → Your workflow → Run workflow).
+
