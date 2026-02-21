@@ -25,3 +25,28 @@ python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+
+
+# LangChain + Local Hugging Face RAG Starter
+
+Purpose
+-------
+Prototype a retrieval-augmented generation (RAG) agent using:
+- Local HF generation model: `google/flan-t5-small`
+- Embeddings: `sentence-transformers/all-MiniLM-L6-v2`
+- Vector DB: FAISS
+- Orchestration: LangChain (lightweight use)
+
+Prerequisites
+-------------
+- Python 3.10+
+- Git
+- (Optional) GPU + CUDA for larger models
+
+Quick local install
+-------------------
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
