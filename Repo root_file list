@@ -1,0 +1,13 @@
+README.md
+requirements.txt
+.gitignore
+.devcontainer/devcontainer.json
+.devcontainer/Dockerfile
+.vscode/launch.json
+.vscode/tasks.json
+.github/workflows/ci.yml
+data/.gitkeep
+indexes/.gitkeep
+src/ingest.py
+src/agent.py
+src/run.py
